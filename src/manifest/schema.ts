@@ -27,6 +27,17 @@ export const ManifestSchema = z.object({
     root: z.string().default('docs'),
     mustExist: z.array(z.string()).default(['docs/index.md', 'docs/architecture', 'docs/how-to']),
     conventionsSource: z.string().default('docs/index.md'),
+    docStructure: z.object({
+      categories: z.array(
+        z.object({
+          name: z.string(),
+          reason: z.string(),
+          topics: z.array(z.string()),
+          createdAt: z.string(),
+        })
+      ).default([]),
+      analysisVersion: z.string().default('1'),
+    }).optional(),
   }),
 
   runs: z.object({

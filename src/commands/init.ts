@@ -1,20 +1,30 @@
 import { Command } from 'commander';
-import { mkdir, writeFile, readFile } from 'fs/promises';
+import { mkdir, writeFile, access } from 'fs/promises';
 import { resolve, join } from 'path';
 import { logger } from '../utils/logger.js';
 import { loadConfig } from '../config/loader.js';
 import { discoverRepository } from '../scan/discovery.js';
 import { loadIgnoreRules } from '../scan/ignore.js';
 import { partitionIntoUnits } from '../scan/units.js';
-import { validateGitRepository, getCurrentCommit } from '../git/index.js';
+import { analyzeProject } from '../scan/analyze.js';
+import { validateGitRepository } from '../git/index.js';
 import { createManifest, initializeCoverageMap } from '../manifest/index.js';
-import { createLLMClient, generateLeafPrompt, LEAF_ANALYSIS_SYSTEM_PROMPT, CONVENTIONS_SYSTEM_PROMPT } from '../llm/index.js';
+import { createLLMClient } from '../llm/index.js';
+import { InteractiveContextProvider } from '../llm/context-provider.js';
+import { generateCategoryContent, createFallbackCategoryContent } from '../llm/prompts/category.js';
+import {
+  planDocStructure,
+  createDefaultStructure,
+  generateEnhancedConventionsDoc,
+  type DocStructure,
+} from './init-helpers.js';
 
 export function createInitCommand() {
   return new Command('init')
     .description('Bootstrap documentation folder for the repository')
     .option('--interactive', 'Run in interactive mode')
     .option('--dry-run', 'Show what would be created without writing files')
+    .option('--force', 'Regenerate documentation even if it already exists')
     .action(async (options) => {
       try {
         const cwd = process.cwd();
@@ -48,11 +58,71 @@ export function createInitCommand() {
         const units = await partitionIntoUnits(repoInfo);
         logger.success(`Found ${units.length} documentation units`);
 
+        // Check if docs already exist
+        const docsRoot = resolve(cwd, config.docs.root);
+        const manifestPath = join(docsRoot, '.manifest.json');
+        try {
+          await access(manifestPath);
+          if (!options.force) {
+            logger.warn('Documentation already initialized. Use --force to regenerate.');
+            logger.info('Run `docpulse update` to update existing docs.');
+            process.exit(0);
+          }
+          logger.info('Forcing reinitialization...');
+        } catch {
+          // Manifest doesn't exist, proceed
+        }
+
+        // Step 1: Analyze project
+        logger.info('Analyzing project structure...');
+        const analysis = await analyzeProject(cwd, repoInfo, units);
+
+        // Create LLM client if API key available
+        let llmClient = null;
+        if (config.llm.apiKey) {
+          logger.info(`Using LLM: ${config.llm.model}`);
+          llmClient = createLLMClient({
+            baseUrl: config.llm.baseUrl,
+            apiKey: config.llm.apiKey,
+            model: config.llm.model,
+          });
+        } else {
+          logger.warn('No LLM API key configured - will create default structure');
+        }
+
+        // Step 2: Interactive structure planning with LLM
+        let docStructure: DocStructure;
+        let requestedFiles: string[] = [];
+
+        if (llmClient) {
+          logger.info('Planning documentation structure with LLM...');
+          const contextProvider = new InteractiveContextProvider();
+          const { fullContext, requestedFiles: files } = await contextProvider.gatherContext(
+            llmClient,
+            analysis,
+            cwd
+          );
+          requestedFiles = files;
+
+          docStructure = await planDocStructure(llmClient, analysis, fullContext, requestedFiles);
+          logger.success(`Planned ${docStructure.categories.length} documentation categories`);
+
+          docStructure.categories.forEach((cat) => {
+            logger.info(`  - ${cat.name}: ${cat.reason}`);
+          });
+        } else {
+          // Fallback: Use minimum categories
+          logger.warn('Using default structure (architecture, how-to)');
+          docStructure = createDefaultStructure();
+        }
+
+        // Dry run preview
         if (options.dryRun) {
           logger.info('\n[DRY RUN] Would create:');
           logger.info(`  - docs/index.md (conventions)`);
-          logger.info(`  - docs/architecture/ (cross-cutting docs)`);
-          logger.info(`  - docs/how-to/ (guides)`);
+          docStructure.categories.forEach((cat) => {
+            logger.info(`  - docs/${cat.name}/index.md`);
+          });
           units.forEach((unit) => {
             if (unit.kind !== 'repo') {
               logger.info(`  - ${unit.doc}`);
@@ -62,15 +132,39 @@ export function createInitCommand() {
           return;
         }
 
-        // Create docs directory structure
-        const docsRoot = resolve(cwd, config.docs.root);
+        // Step 3: Create folder structure
+        logger.info('Creating documentation folders...');
         await mkdir(docsRoot, { recursive: true });
-        await mkdir(join(docsRoot, 'architecture'), { recursive: true });
-        await mkdir(join(docsRoot, 'how-to'), { recursive: true });
 
-        // Create manifest
+        for (const category of docStructure.categories) {
+          await mkdir(join(docsRoot, category.name), { recursive: true });
+          logger.debug(`Created docs/${category.name}/`);
+        }
+
+        // Step 4: Generate category content
+        logger.info('Generating documentation content...');
+        for (const category of docStructure.categories) {
+          const content = llmClient
+            ? await generateCategoryContent(llmClient, category, analysis)
+            : createFallbackCategoryContent(category);
+
+          await writeFile(join(docsRoot, category.name, 'index.md'), content);
+          logger.success(`Generated docs/${category.name}/index.md`);
+        }
+
+        // Step 5: Generate conventions
+        logger.info('Creating documentation conventions...');
+        const conventionsDoc = await generateEnhancedConventionsDoc(
+          llmClient,
+          repoInfo,
+          units,
+          docStructure
+        );
+        await writeFile(join(docsRoot, 'index.md'), conventionsDoc);
+        logger.success('Generated docs/index.md');
+
+        // Step 6: Create manifest with structure info
         logger.info('Creating manifest...');
-        const currentCommit = await getCurrentCommit(cwd);
         const manifest = await createManifest(
           cwd,
           {
@@ -92,39 +186,25 @@ export function createInitCommand() {
         // Initialize coverage map
         manifest.coverageMap = initializeCoverageMap(manifest.units);
 
-        // Create LLM client if API key available
-        let llmClient = null;
-        if (config.llm.apiKey) {
-          logger.info(`Using LLM: ${config.llm.model}`);
-          llmClient = createLLMClient({
-            baseUrl: config.llm.baseUrl,
-            apiKey: config.llm.apiKey,
-            model: config.llm.model,
-          });
-        } else {
-          logger.warn('No LLM API key configured - will create stub documentation');
-        }
+        // Add structure info to manifest
+        manifest.docLayout.docStructure = {
+          categories: docStructure.categories.map((cat) => ({
+            ...cat,
+            createdAt: new Date().toISOString(),
+          })),
+          analysisVersion: '1',
+        };
 
-        // Generate documentation
-        logger.info('Generating documentation...');
+        // Write manifest
+        await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+        logger.success('Created docs/.manifest.json');
 
-        // Create stub architecture docs
-        await writeFile(
-          join(docsRoot, 'architecture/index.md'),
-          `# Architecture\n\nCross-cutting architectural documentation will be added here.\n\n## Topics\n\n- Build system\n- Testing strategy\n- Deployment\n- Configuration\n`
-        );
+        logger.success(`\nDocumentation initialized in ${config.docs.root}/`);
+        logger.info('\nGenerated categories:');
+        docStructure.categories.forEach((cat) => {
+          logger.info(`  - ${cat.name}: ${cat.reason}`);
+        });
 
-        // Create stub how-to docs
-        await writeFile(
-          join(docsRoot, 'how-to/index.md'),
-          `# How-To Guides\n\nStep-by-step guides for common tasks.\n\n## Guides\n\n- Getting started\n- Running tests\n- Debugging\n- Contributing\n`
-        );
-
-        // Generate docs/index.md (conventions)
-        const conventionsDoc = await generateConventionsDoc(llmClient, repoInfo, units);
-        await writeFile(join(docsRoot, 'index.md'), conventionsDoc);
-
-        logger.success(`Documentation initialized in ${config.docs.root}/`);
         logger.info('\nNext steps:');
         logger.info('  1. Review the generated documentation');
         logger.info('  2. Run `docpulse update` to update docs when code changes');
@@ -134,69 +214,4 @@ export function createInitCommand() {
         process.exit(1);
       }
     });
-}
-
-async function generateConventionsDoc(
-  llmClient: any,
-  repoInfo: any,
-  units: any[]
-): Promise<string> {
-  if (!llmClient) {
-    // Create basic conventions without LLM
-    return `# Documentation
-
-This repository uses DocPulse for maintaining up-to-date documentation.
-
-## Structure
-
-- \`docs/index.md\` (this file): Documentation conventions and organization
-- \`docs/architecture/\`: Cross-cutting architectural documentation
-- \`docs/how-to/\`: Step-by-step guides for common tasks
-${units.length > 1 ? `- \`docs/packages/\`: Per-package documentation\n` : ''}
-
-## Conventions
-
-- Write clear, concise documentation for developers
-- Focus on "why" rather than "what" (code shows what)
-- Include code examples where helpful
-- Keep documentation close to the code it describes
-- Update docs when making code changes
-
-## Detected Structure
-
-- Package manager: ${repoInfo.packageManager}
-- Workspace type: ${repoInfo.workspaceType}
-- Languages: ${repoInfo.languages.join(', ')}
-- Units: ${units.length}
-`;
-  }
-
-  // Generate with LLM
-  try {
-    const prompt = `Create a conventions document (docs/index.md) for this repository:
-
-**Repository Info:**
-- Package manager: ${repoInfo.packageManager}
-- Workspace type: ${repoInfo.workspaceType}
-- Languages: ${repoInfo.languages.join(', ')}
-- Documentation units: ${units.length}
-
-Include:
-1. Purpose of documentation in this repo
-2. How docs/ folder is organized
-3. Writing conventions (tone, style, what to include/exclude)
-4. How DocPulse should behave on updates
-
-Write in Markdown format.`;
-
-    const content = await llmClient.complete([
-      { role: 'system', content: CONVENTIONS_SYSTEM_PROMPT },
-      { role: 'user', content: prompt },
-    ]);
-
-    return content;
-  } catch (error) {
-    logger.warn('Failed to generate conventions with LLM, using fallback');
-    return generateConventionsDoc(null, repoInfo, units);
-  }
 }
