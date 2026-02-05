@@ -339,7 +339,7 @@ DocPulse consists of several modules:
 
 - **scan/**: Repository discovery and structure detection
 - **git/**: Git operations (diff, state, validation)
-- **graph/**: Dependency graph (Tree-sitter parsing)
+- **graph/**: Dependency graph (import/export parsing)
 - **manifest/**: State management and coverage mapping
 - **llm/**: LLM client and prompting
 - **commands/**: CLI command implementations
@@ -352,7 +352,6 @@ See `checkpoints/` folder for detailed implementation notes.
 - Requires git repository
 - Dependency graph is import-based (runtime deps not tracked)
 - LLM context windows limit unit size
-- Tree-sitter native modules may need rebuild on different platforms
 
 ## Roadmap
 
@@ -386,7 +385,7 @@ Contributions welcome! Please:
 
 Built with:
 - Commander.js (CLI framework)
-- Tree-sitter (code parsing)
+- es-module-lexer (import/export parsing)
 - Zod (schema validation)
 - TypeScript (type safety)
 - Vitest (testing)
