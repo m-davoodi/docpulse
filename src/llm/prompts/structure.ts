@@ -1,24 +1,44 @@
 import { BASE_SYSTEM_PROMPT } from './system.js';
 
 /**
- * System prompt for structure planning
+ * Default category descriptions for system prompt
  */
-export const STRUCTURE_PLANNING_SYSTEM_PROMPT = `${BASE_SYSTEM_PROMPT}
+const CATEGORY_DESCRIPTIONS: Record<string, string> = {
+  architecture: 'Cross-cutting architectural documentation',
+  'how-to': 'Step-by-step guides for common tasks',
+  onboarding: 'Getting started guides, new developer setup, project introduction',
+  api: 'Public APIs, library interfaces, SDK documentation',
+  release: 'Release process, publishing, versioning, changelog management',
+  contributing: 'Contribution guidelines, setup for contributors, PR process',
+  deployment: 'Deployment procedures, infrastructure, environments',
+  testing: 'Testing strategy, running tests, writing tests',
+  troubleshooting: 'Common issues, debugging, FAQ',
+};
+
+/**
+ * Create system prompt for structure planning with configurable required categories
+ */
+export function createStructurePlanningSystemPrompt(requiredCategories: string[]): string {
+  const requiredList = requiredCategories
+    .map((cat) => `- ${cat}: ${CATEGORY_DESCRIPTIONS[cat] || 'Documentation category'}`)
+    .join('\n');
+
+  const optionalCategories = Object.keys(CATEGORY_DESCRIPTIONS).filter(
+    (cat) => !requiredCategories.includes(cat)
+  );
+  const optionalList = optionalCategories
+    .map((cat) => `- ${cat}: ${CATEGORY_DESCRIPTIONS[cat]}`)
+    .join('\n');
+
+  return `${BASE_SYSTEM_PROMPT}
 
 Task: Analyze a codebase and decide which documentation categories are needed.
 
 REQUIRED minimum categories:
-- architecture: Cross-cutting architectural documentation
-- how-to: Step-by-step guides for common tasks
-- onboarding: Getting started guides, new developer setup, project introduction
+${requiredList}
 
 OPTIONAL categories (only create if evidence exists):
-- api: Public APIs, library interfaces, SDK documentation
-- release: Release process, publishing, versioning, changelog management
-- contributing: Contribution guidelines, setup for contributors, PR process
-- deployment: Deployment procedures, infrastructure, environments
-- testing: Testing strategy, running tests, writing tests
-- troubleshooting: Common issues, debugging, FAQ
+${optionalList}
 
 For each category you decide to create:
 1. Explain WHY it's needed (cite evidence from the codebase)
@@ -41,13 +61,15 @@ Output format (JSON only, no other text):
 }
 
 Be selective - only create categories where you have clear evidence they are needed.`;
+}
 
 /**
  * Create user prompt for structure planning
  */
 export function createStructurePlanningPrompt(
   fullContext: string,
-  requestedFiles: string[]
+  requestedFiles: string[],
+  requiredCategories: string[]
 ): string {
   let prompt = fullContext;
 
@@ -57,12 +79,14 @@ export function createStructurePlanningPrompt(
     prompt += '\n';
   }
 
+  const requiredList = requiredCategories.join(', ');
+
   prompt += `\n---
 
 Based on the project analysis above, decide which documentation categories are needed.
 
 Remember:
-- ALWAYS include: architecture, how-to, onboarding
+- ALWAYS include: ${requiredList}
 - ADD optional categories ONLY if you have clear evidence
 - Provide specific reasons citing what you see in the codebase
 - List concrete topics to document in each category
@@ -88,7 +112,10 @@ export interface StructurePlanningResponse {
 /**
  * Parse structure planning response from LLM
  */
-export function parseStructurePlanningResponse(response: string): StructurePlanningResponse {
+export function parseStructurePlanningResponse(
+  response: string,
+  requiredCategories: string[]
+): StructurePlanningResponse {
   // Try to extract JSON from markdown code blocks if present
   const jsonMatch = response.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
   const jsonStr = jsonMatch ? jsonMatch[1] : response;
@@ -104,14 +131,10 @@ export function parseStructurePlanningResponse(response: string): StructurePlann
   const categoryNames = new Set(parsed.categories.map((c: DocCategory) => c.name));
   const missingRequired: string[] = [];
 
-  if (!categoryNames.has('architecture')) {
-    missingRequired.push('architecture');
-  }
-  if (!categoryNames.has('how-to')) {
-    missingRequired.push('how-to');
-  }
-  if (!categoryNames.has('onboarding')) {
-    missingRequired.push('onboarding');
+  for (const requiredCategory of requiredCategories) {
+    if (!categoryNames.has(requiredCategory)) {
+      missingRequired.push(requiredCategory);
+    }
   }
 
   // Add missing required categories

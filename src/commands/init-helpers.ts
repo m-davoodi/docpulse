@@ -4,7 +4,7 @@ import type { RepoInfo } from '../scan/discovery.js';
 import type { Unit } from '../scan/units.js';
 import { logger } from '../utils/logger.js';
 import {
-  STRUCTURE_PLANNING_SYSTEM_PROMPT,
+  createStructurePlanningSystemPrompt,
   createStructurePlanningPrompt,
   parseStructurePlanningResponse,
   type DocCategory,
@@ -22,22 +22,24 @@ export async function planDocStructure(
   llmClient: LLMClient,
   analysis: ProjectAnalysis,
   fullContext: string,
-  requestedFiles: string[]
+  requestedFiles: string[],
+  requiredCategories: string[]
 ): Promise<DocStructure> {
   logger.debug('Planning documentation structure with LLM...');
 
-  const prompt = createStructurePlanningPrompt(fullContext, requestedFiles);
+  const systemPrompt = createStructurePlanningSystemPrompt(requiredCategories);
+  const prompt = createStructurePlanningPrompt(fullContext, requestedFiles, requiredCategories);
 
   try {
     const response = await llmClient.complete(
       [
-        { role: 'system', content: STRUCTURE_PLANNING_SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: prompt },
       ],
       { temperature: 0.5 }
     );
 
-    const result = parseStructurePlanningResponse(response);
+    const result = parseStructurePlanningResponse(response, requiredCategories);
     
     logger.debug(`LLM planned ${result.categories.length} categories`);
     
@@ -45,48 +47,51 @@ export async function planDocStructure(
   } catch (error) {
     logger.error('Failed to plan structure with LLM:', error);
     logger.warn('Falling back to default structure');
-    return createDefaultStructure();
+    return createDefaultStructure(requiredCategories);
   }
 }
 
 /**
  * Create default documentation structure (fallback)
  */
-export function createDefaultStructure(): DocStructure {
+export function createDefaultStructure(requiredCategories: string[]): DocStructure {
+  const categoryDefaults: Record<string, { reason: string; topics: string[] }> = {
+    architecture: {
+      reason: 'Default: Cross-cutting architectural documentation',
+      topics: [
+        'Project structure',
+        'Key modules and components',
+        'Design patterns',
+        'Technology stack',
+      ],
+    },
+    'how-to': {
+      reason: 'Default: Practical guides for common tasks',
+      topics: [
+        'Getting started',
+        'Development workflow',
+        'Running tests',
+        'Debugging',
+        'Contributing',
+      ],
+    },
+    onboarding: {
+      reason: 'Default: Getting started guides for new developers',
+      topics: [
+        'Prerequisites',
+        'Installation',
+        'First steps',
+        'Project overview',
+      ],
+    },
+  };
+
   return {
-    categories: [
-      {
-        name: 'architecture',
-        reason: 'Default: Cross-cutting architectural documentation',
-        topics: [
-          'Project structure',
-          'Key modules and components',
-          'Design patterns',
-          'Technology stack',
-        ],
-      },
-      {
-        name: 'how-to',
-        reason: 'Default: Practical guides for common tasks',
-        topics: [
-          'Getting started',
-          'Development workflow',
-          'Running tests',
-          'Debugging',
-          'Contributing',
-        ],
-      },
-      {
-        name: 'onboarding',
-        reason: 'Default: Getting started guides for new developers',
-        topics: [
-          'Prerequisites',
-          'Installation',
-          'First steps',
-          'Project overview',
-        ],
-      },
-    ],
+    categories: requiredCategories.map((name) => ({
+      name,
+      reason: categoryDefaults[name]?.reason || `Default: ${name} documentation`,
+      topics: categoryDefaults[name]?.topics || [],
+    })),
   };
 }
 

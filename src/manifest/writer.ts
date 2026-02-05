@@ -87,8 +87,15 @@ export async function createManifest(
   },
   units: Manifest['units'],
   ignorePatterns: string[],
-  docsRoot = 'docs'
+  docsRoot = 'docs',
+  requiredCategories: string[] = ['architecture', 'how-to', 'onboarding']
 ): Promise<Manifest> {
+  // Build mustExist from required categories
+  const mustExist = [
+    'docs/index.md',
+    ...requiredCategories.map((cat) => `docs/${cat}`),
+  ];
+
   const manifest: Manifest = {
     schemaVersion: 1,
     tool: {
@@ -108,7 +115,7 @@ export async function createManifest(
     },
     docLayout: {
       root: docsRoot,
-      mustExist: ['docs/index.md', 'docs/architecture', 'docs/how-to'],
+      mustExist,
       conventionsSource: 'docs/index.md',
     },
     runs: {

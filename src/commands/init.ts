@@ -93,6 +93,7 @@ export function createInitCommand() {
         // Step 2: Interactive structure planning with LLM
         let docStructure: DocStructure;
         let requestedFiles: string[] = [];
+        const requiredCategories = config.docs.categories.required;
 
         if (llmClient) {
           logger.info('Planning documentation structure with LLM...');
@@ -104,7 +105,7 @@ export function createInitCommand() {
           );
           requestedFiles = files;
 
-          docStructure = await planDocStructure(llmClient, analysis, fullContext, requestedFiles);
+          docStructure = await planDocStructure(llmClient, analysis, fullContext, requestedFiles, requiredCategories);
           logger.success(`Planned ${docStructure.categories.length} documentation categories`);
 
           docStructure.categories.forEach((cat) => {
@@ -112,8 +113,8 @@ export function createInitCommand() {
           });
         } else {
           // Fallback: Use minimum categories
-          logger.warn('Using default structure (architecture, how-to)');
-          docStructure = createDefaultStructure();
+          logger.warn(`Using default structure (${requiredCategories.join(', ')})`);
+          docStructure = createDefaultStructure(requiredCategories);
         }
 
         // Dry run preview
@@ -180,7 +181,8 @@ export function createInitCommand() {
             entrypoints: u.entrypoints,
           })),
           ignoreRules.patterns,
-          config.docs.root
+          config.docs.root,
+          requiredCategories
         );
 
         // Initialize coverage map

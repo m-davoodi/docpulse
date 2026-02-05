@@ -13,6 +13,11 @@ export const ConfigSchema = z.object({
     .object({
       root: z.string().default('docs'),
       templates: z.record(z.string()).default({}),
+      categories: z
+        .object({
+          required: z.array(z.string()).default(['architecture', 'how-to', 'onboarding']),
+        })
+        .default({}),
     })
     .default({}),
   ignore: z.array(z.string()).default(['node_modules/**', 'dist/**', 'build/**', 'coverage/**']),

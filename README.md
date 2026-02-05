@@ -83,7 +83,9 @@ docs/
 ├── .manifest.json        # State and metadata
 ├── architecture/
 │   └── index.md
-└── how-to/
+├── how-to/
+│   └── index.md
+└── onboarding/
     └── index.md
 ```
 
@@ -171,7 +173,10 @@ docpulse plan --since abc123 # Plan from specific commit
   },
   "docs": {
     "root": "docs",
-    "templates": {}
+    "templates": {},
+    "categories": {
+      "required": ["architecture", "how-to", "onboarding"]
+    }
   },
   "ignore": [
     "node_modules/**",
@@ -180,6 +185,17 @@ docpulse plan --since abc123 # Plan from specific commit
   ]
 }
 ```
+
+**Configuration Options:**
+
+- `llm.provider`: LLM provider (default: "openai")
+- `llm.model`: Model to use (default: "gpt-4o")
+- `llm.baseUrl`: API base URL (default: "https://api.openai.com/v1")
+- `llm.apiKey`: API key (can use `${ENV_VAR}` syntax)
+- `docs.root`: Documentation output directory (default: "docs")
+- `docs.templates`: Custom templates (optional)
+- `docs.categories.required`: Required documentation categories that must always be created (default: `["architecture", "how-to", "onboarding"]`)
+- `ignore`: File patterns to ignore during analysis
 
 ### Environment Variables
 
