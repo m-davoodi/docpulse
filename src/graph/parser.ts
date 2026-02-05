@@ -1,8 +1,5 @@
-import Parser from 'tree-sitter';
-import JavaScript from 'tree-sitter-javascript';
-import TypeScript from 'tree-sitter-typescript';
+import { init, parse } from 'es-module-lexer';
 import { readFile } from 'fs/promises';
-import { extname } from 'path';
 import { logger } from '../utils/logger.js';
 
 export interface ImportInfo {
@@ -25,66 +22,92 @@ export interface ModuleInfo {
   exports: ExportInfo[];
 }
 
+// Track initialization state
+let initialized = false;
+
+/**
+ * Ensure es-module-lexer is initialized (must be called before parsing)
+ */
+async function ensureInit(): Promise<void> {
+  if (!initialized) {
+    await init;
+    initialized = true;
+  }
+}
+
 /**
  * Parse a JavaScript or TypeScript file and extract imports/exports
  */
 export async function parseFile(filePath: string): Promise<ModuleInfo> {
-  const ext = extname(filePath);
+  await ensureInit();
+
   const content = await readFile(filePath, 'utf-8');
-
-  const parser = new Parser();
-
-  // Set language based on file extension
-  if (ext === '.ts' || ext === '.tsx') {
-    parser.setLanguage(TypeScript.typescript);
-  } else {
-    parser.setLanguage(JavaScript);
-  }
-
-  const tree = parser.parse(content);
-  const rootNode = tree.rootNode;
 
   const imports: ImportInfo[] = [];
   const exports: ExportInfo[] = [];
 
-  // Walk the tree and extract imports/exports
-  walkTree(rootNode, (node) => {
-    // Handle imports
-    if (node.type === 'import_statement') {
-      const importInfo = extractImport(node, content);
-      if (importInfo) {
-        imports.push(importInfo);
+  try {
+    const [parsedImports, parsedExports] = parse(content);
+
+    // Process imports
+    for (const imp of parsedImports) {
+      // imp.n is the module specifier (import source)
+      // imp.d === -1 means static import, otherwise it's dynamic
+      // imp.d === -2 means import.meta
+      if (imp.n === undefined || imp.d === -2) {
+        continue;
       }
+
+      const isDynamic = imp.d > -1;
+
+      // Extract specifiers from the import statement
+      const statementText = content.slice(imp.ss, imp.se);
+      const { specifiers, isNamespace } = extractImportSpecifiers(statementText);
+
+      imports.push({
+        source: imp.n,
+        specifiers,
+        isNamespace,
+        isDynamic,
+      });
     }
 
-    // Handle dynamic imports
-    if (node.type === 'call_expression') {
-      const importInfo = extractDynamicImport(node, content);
-      if (importInfo) {
-        imports.push(importInfo);
-      }
+    // Process exports
+    for (const exp of parsedExports) {
+      // exp.n is the exported name
+      // exp.ln is the local name (for re-exports)
+      // exp.s, exp.e are positions
+      const exportName = exp.n;
+
+      // Check if it's a re-export by looking at the statement
+      const statementStart = findExportStatementStart(content, exp.s);
+      const statementEnd = findExportStatementEnd(content, exp.e);
+      const statementText = content.slice(statementStart, statementEnd);
+
+      const isDefault = exportName === 'default';
+      const isNamespace = statementText.includes('export *');
+
+      // Check for re-export source
+      const sourceMatch = statementText.match(/from\s+['"]([^'"]+)['"]/);
+      const source = sourceMatch ? sourceMatch[1] : undefined;
+
+      exports.push({
+        source,
+        specifiers: [exportName],
+        isNamespace,
+        isDefault,
+      });
     }
 
-    // Handle CommonJS require
-    if (node.type === 'call_expression') {
-      const requireInfo = extractRequire(node, content);
-      if (requireInfo) {
-        imports.push(requireInfo);
-      }
-    }
-
-    // Handle exports
-    if (
-      node.type === 'export_statement' ||
-      node.type === 'export_declaration' ||
-      node.type === 'export_default_declaration'
-    ) {
-      const exportInfo = extractExport(node, content);
-      if (exportInfo) {
-        exports.push(exportInfo);
-      }
-    }
-  });
+    // Also extract CommonJS require() calls
+    const requireImports = extractRequires(content);
+    imports.push(...requireImports);
+  } catch (error) {
+    // es-module-lexer can fail on some edge cases, fall back to regex
+    logger.debug(`es-module-lexer failed for ${filePath}, falling back to regex:`, error);
+    const fallbackImports = extractImportsWithRegex(content);
+    imports.push(...fallbackImports);
+  }
 
   logger.debug(`Parsed ${filePath}: ${imports.length} imports, ${exports.length} exports`);
 
@@ -96,184 +119,145 @@ export async function parseFile(filePath: string): Promise<ModuleInfo> {
 }
 
 /**
- * Walk a syntax tree and call a visitor function for each node
+ * Extract import specifiers from an import statement
  */
-function walkTree(node: Parser.SyntaxNode, visitor: (node: Parser.SyntaxNode) => void) {
-  visitor(node);
+function extractImportSpecifiers(statement: string): { specifiers: string[]; isNamespace: boolean } {
+  const specifiers: string[] = [];
+  let isNamespace = false;
 
-  for (const child of node.children) {
-    walkTree(child, visitor);
+  // Check for namespace import: import * as name
+  const namespaceMatch = statement.match(/import\s+\*\s+as\s+(\w+)/);
+  if (namespaceMatch) {
+    isNamespace = true;
+    specifiers.push(namespaceMatch[1]);
+    return { specifiers, isNamespace };
   }
+
+  // Check for default import: import name from
+  const defaultMatch = statement.match(/import\s+(\w+)\s+from/);
+  if (defaultMatch && !statement.includes('{')) {
+    specifiers.push(defaultMatch[1]);
+  }
+
+  // Check for default import with named imports: import name, { ... } from
+  const defaultWithNamedMatch = statement.match(/import\s+(\w+)\s*,\s*\{/);
+  if (defaultWithNamedMatch) {
+    specifiers.push(defaultWithNamedMatch[1]);
+  }
+
+  // Check for named imports: import { a, b, c } from
+  const namedMatch = statement.match(/\{([^}]+)\}/);
+  if (namedMatch) {
+    const names = namedMatch[1].split(',').map((n) => {
+      // Handle "as" aliases: import { foo as bar }
+      const parts = n.trim().split(/\s+as\s+/);
+      return parts[parts.length - 1].trim();
+    });
+    specifiers.push(...names.filter((n) => n.length > 0));
+  }
+
+  // Dynamic import doesn't have specifiers at parse time
+  if (statement.includes('import(')) {
+    return { specifiers: [], isNamespace: false };
+  }
+
+  return { specifiers, isNamespace };
 }
 
 /**
- * Extract import information from an import statement node
+ * Find the start of an export statement (scan backwards for 'export')
  */
-function extractImport(node: Parser.SyntaxNode, source: string): ImportInfo | null {
-  try {
-    // Find the import source (string literal)
-    const sourceNode = node.descendantsOfType('string').find((n) => n.parent?.type === 'import_statement');
+function findExportStatementStart(content: string, pos: number): number {
+  // Scan backwards to find 'export' keyword
+  let i = pos;
+  while (i > 0) {
+    if (content.slice(i - 6, i) === 'export') {
+      return i - 6;
+    }
+    i--;
+    // Don't go too far back
+    if (pos - i > 200) break;
+  }
+  return pos;
+}
 
-    if (!sourceNode) {
-      return null;
+/**
+ * Find the end of an export statement (scan forwards for semicolon or newline)
+ */
+function findExportStatementEnd(content: string, pos: number): number {
+  let i = pos;
+  while (i < content.length) {
+    if (content[i] === ';' || content[i] === '\n') {
+      return i + 1;
+    }
+    i++;
+    // Don't go too far forward
+    if (i - pos > 500) break;
+  }
+  return Math.min(pos + 100, content.length);
+}
+
+/**
+ * Extract CommonJS require() calls using regex
+ */
+function extractRequires(content: string): ImportInfo[] {
+  const imports: ImportInfo[] = [];
+
+  // Match require('...') or require("...")
+  const requireRegex = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  let match;
+
+  while ((match = requireRegex.exec(content)) !== null) {
+    // Skip if it's inside a comment
+    const lineStart = content.lastIndexOf('\n', match.index) + 1;
+    const lineContent = content.slice(lineStart, match.index);
+    if (lineContent.includes('//') || lineContent.trim().startsWith('*')) {
+      continue;
     }
 
-    const importSource = source.slice(sourceNode.startIndex, sourceNode.endIndex).replace(/['"]/g, '');
-
-    // Find import clause
-    const importClause = node.childForFieldName('import');
-    
-    const specifiers: string[] = [];
-    let isNamespace = false;
-
-    if (importClause) {
-      // Check for namespace import (import * as foo)
-      if (importClause.text.includes('* as')) {
-        isNamespace = true;
-        const namespaceSpecifier = importClause.descendantsOfType('identifier').find(n => 
-          n.parent?.type === 'namespace_import'
-        );
-        if (namespaceSpecifier) {
-          specifiers.push(namespaceSpecifier.text);
-        }
-      } else {
-        // Extract named imports or default import
-        const identifiers = importClause.descendantsOfType('identifier');
-        for (const id of identifiers) {
-          specifiers.push(id.text);
-        }
-      }
-    }
-
-    return {
-      source: importSource,
-      specifiers,
-      isNamespace,
+    imports.push({
+      source: match[1],
+      specifiers: [],
+      isNamespace: false,
       isDynamic: false,
-    };
-  } catch (error) {
-    logger.debug('Failed to extract import:', error);
-    return null;
+    });
   }
+
+  return imports;
 }
 
 /**
- * Extract dynamic import information (import('...'))
+ * Fallback regex-based import extraction for files that es-module-lexer can't parse
  */
-function extractDynamicImport(node: Parser.SyntaxNode, source: string): ImportInfo | null {
-  try {
-    // Check if this is a dynamic import
-    const functionNode = node.childForFieldName('function');
-    if (!functionNode || functionNode.type !== 'import') {
-      return null;
-    }
+function extractImportsWithRegex(content: string): ImportInfo[] {
+  const imports: ImportInfo[] = [];
 
-    // Get the argument (import source)
-    const args = node.childForFieldName('arguments');
-    if (!args) {
-      return null;
-    }
+  // Match ES imports
+  const importRegex = /import\s+(?:(?:\*\s+as\s+\w+)|(?:\w+(?:\s*,\s*\{[^}]*\})?)|(?:\{[^}]*\}))\s+from\s+['"]([^'"]+)['"]/g;
+  let match;
 
-    const stringNode = args.descendantsOfType('string')[0];
-    if (!stringNode) {
-      return null;
-    }
+  while ((match = importRegex.exec(content)) !== null) {
+    imports.push({
+      source: match[1],
+      specifiers: [],
+      isNamespace: false,
+      isDynamic: false,
+    });
+  }
 
-    const importSource = source.slice(stringNode.startIndex, stringNode.endIndex).replace(/['"]/g, '');
-
-    return {
-      source: importSource,
+  // Match dynamic imports
+  const dynamicImportRegex = /import\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  while ((match = dynamicImportRegex.exec(content)) !== null) {
+    imports.push({
+      source: match[1],
       specifiers: [],
       isNamespace: false,
       isDynamic: true,
-    };
-  } catch (error) {
-    logger.debug('Failed to extract dynamic import:', error);
-    return null;
+    });
   }
-}
 
-/**
- * Extract CommonJS require information
- */
-function extractRequire(node: Parser.SyntaxNode, source: string): ImportInfo | null {
-  try {
-    const functionNode = node.childForFieldName('function');
-    if (!functionNode || functionNode.type !== 'identifier' || functionNode.text !== 'require') {
-      return null;
-    }
+  // Match require() calls
+  imports.push(...extractRequires(content));
 
-    const args = node.childForFieldName('arguments');
-    if (!args) {
-      return null;
-    }
-
-    const stringNode = args.descendantsOfType('string')[0];
-    if (!stringNode) {
-      return null;
-    }
-
-    const requireSource = source.slice(stringNode.startIndex, stringNode.endIndex).replace(/['"]/g, '');
-
-    return {
-      source: requireSource,
-      specifiers: [],
-      isNamespace: false,
-      isDynamic: false,
-    };
-  } catch (error) {
-    logger.debug('Failed to extract require:', error);
-    return null;
-  }
-}
-
-/**
- * Extract export information
- */
-function extractExport(node: Parser.SyntaxNode, source: string): ExportInfo | null {
-  try {
-    const specifiers: string[] = [];
-    let exportSource: string | undefined;
-    let isNamespace = false;
-    let isDefault = false;
-
-    // Check for default export
-    if (node.type === 'export_default_declaration') {
-      isDefault = true;
-      return {
-        specifiers: ['default'],
-        isNamespace: false,
-        isDefault: true,
-      };
-    }
-
-    // Check for re-export (export { x } from './y')
-    const sourceNode = node.descendantsOfType('string')[0];
-    if (sourceNode) {
-      exportSource = source.slice(sourceNode.startIndex, sourceNode.endIndex).replace(/['"]/g, '');
-    }
-
-    // Check for namespace export (export * from)
-    if (node.text.includes('export *')) {
-      isNamespace = true;
-    }
-
-    // Extract named exports
-    const identifiers = node.descendantsOfType('identifier');
-    for (const id of identifiers) {
-      if (id.parent?.type === 'export_specifier' || id.parent?.type === 'export_clause') {
-        specifiers.push(id.text);
-      }
-    }
-
-    return {
-      source: exportSource,
-      specifiers,
-      isNamespace,
-      isDefault,
-    };
-  } catch (error) {
-    logger.debug('Failed to extract export:', error);
-    return null;
-  }
+  return imports;
 }

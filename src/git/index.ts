@@ -2,6 +2,7 @@ export {
   getChangedFiles,
   getDiffStats,
   getFileDiff,
+  getFileDiffs,
   hasUncommittedChanges,
   getCurrentCommit,
   commitExists,

@@ -1,5 +1,8 @@
 export type LogLevel = 'info' | 'warn' | 'error' | 'debug' | 'success';
 
+/**
+ * Logger class for consistent output formatting
+ */
 export class Logger {
   private verbose = false;
   private quiet = false;

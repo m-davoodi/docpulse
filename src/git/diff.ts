@@ -138,6 +138,40 @@ export async function getFileDiff(
 }
 
 /**
+ * Get detailed diffs for multiple files
+ */
+export async function getFileDiffs(
+  repoRoot: string,
+  fromCommit: string,
+  filePaths: string[],
+  toCommit = 'HEAD'
+): Promise<FileDiff[]> {
+  logger.debug(`Getting diffs for ${filePaths.length} files`);
+
+  const diffs: FileDiff[] = [];
+
+  // Process files in batches to avoid overwhelming the system
+  const batchSize = 10;
+  for (let i = 0; i < filePaths.length; i += batchSize) {
+    const batch = filePaths.slice(i, i + batchSize);
+    
+    const batchResults = await Promise.all(
+      batch.map(filePath => getFileDiff(repoRoot, filePath, fromCommit, toCommit))
+    );
+
+    // Filter out null results and add to diffs array
+    for (const result of batchResults) {
+      if (result !== null) {
+        diffs.push(result);
+      }
+    }
+  }
+
+  logger.debug(`Retrieved ${diffs.length} diffs out of ${filePaths.length} files`);
+  return diffs;
+}
+
+/**
  * Parse diff output into hunks
  */
 function parseDiffHunks(diffOutput: string): DiffHunk[] {

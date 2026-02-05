@@ -21,6 +21,7 @@ export interface ProjectAnalysis {
     folders: string[];
     files: string[];
   };
+  sourceFileTree: string[];
   markdownFiles: Array<{
     path: string;
     size: number;
@@ -64,12 +65,16 @@ export async function analyzeProject(
   // Check if publishable
   const hasPublishConfig = checkPublishable(packageJson);
 
+  // Get source file tree for LLM context
+  const sourceFileTree = await getSourceFileTree(cwd, topLevelStructure.folders);
+
   return {
     repoInfo,
     unitsSummary,
     readme,
     packageJson,
     topLevelStructure,
+    sourceFileTree,
     markdownFiles,
     hasCI,
     hasTests,
@@ -194,6 +199,113 @@ async function getTopLevelStructure(cwd: string): Promise<{
   }
 
   return { folders, files };
+}
+
+/**
+ * Get source file tree recursively for LLM context
+ * This helps the LLM know exactly what files exist when requesting context
+ */
+async function getSourceFileTree(
+  cwd: string,
+  topLevelFolders: string[]
+): Promise<string[]> {
+  const sourceFiles: string[] = [];
+
+  // Prioritize common source directories
+  const sourceDirs = ['src', 'lib', 'packages', 'apps', 'components', 'utils'];
+  const dirsToScan = topLevelFolders.filter(
+    (folder) =>
+      sourceDirs.includes(folder) ||
+      folder.endsWith('-src') ||
+      folder.startsWith('src-')
+  );
+
+  // Limit total files to avoid context explosion
+  const MAX_FILES = 200;
+
+  for (const dir of dirsToScan) {
+    if (sourceFiles.length >= MAX_FILES) break;
+
+    const dirPath = resolve(cwd, dir);
+    await collectFilesRecursively(dirPath, dir, sourceFiles, MAX_FILES);
+  }
+
+  sourceFiles.sort();
+  logger.debug(`Collected ${sourceFiles.length} source files for LLM context`);
+
+  return sourceFiles;
+}
+
+/**
+ * Recursively collect files from a directory
+ */
+async function collectFilesRecursively(
+  dirPath: string,
+  relativePath: string,
+  files: string[],
+  maxFiles: number
+): Promise<void> {
+  if (files.length >= maxFiles) return;
+
+  try {
+    const entries = await readdir(dirPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (files.length >= maxFiles) break;
+
+      // Skip hidden files, node_modules, dist, and test files
+      if (
+        entry.name.startsWith('.') ||
+        entry.name === 'node_modules' ||
+        entry.name === 'dist' ||
+        entry.name === 'build' ||
+        entry.name === 'coverage'
+      ) {
+        continue;
+      }
+
+      const entryRelativePath = join(relativePath, entry.name);
+
+      if (entry.isDirectory()) {
+        // Skip __tests__ and similar test directories for cleaner output
+        if (entry.name === '__tests__' || entry.name === '__mocks__') {
+          // Still include them but don't recurse deeply
+          files.push(`${entryRelativePath}/`);
+          continue;
+        }
+        await collectFilesRecursively(
+          resolve(dirPath, entry.name),
+          entryRelativePath,
+          files,
+          maxFiles
+        );
+      } else {
+        // Only include code files
+        const codeExtensions = [
+          '.ts',
+          '.tsx',
+          '.js',
+          '.jsx',
+          '.mjs',
+          '.cjs',
+          '.vue',
+          '.svelte',
+          '.py',
+          '.go',
+          '.rs',
+          '.java',
+          '.kt',
+          '.rb',
+          '.php',
+        ];
+        if (codeExtensions.some((ext) => entry.name.endsWith(ext))) {
+          files.push(entryRelativePath);
+        }
+      }
+    }
+  } catch (error) {
+    logger.debug(`Failed to read directory ${dirPath}:`, error);
+  }
 }
 
 /**

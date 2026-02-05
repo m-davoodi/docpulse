@@ -219,6 +219,15 @@ export class InteractiveContextProvider {
       context += '\n```\n\n';
     }
 
+    // Source file tree - helps LLM know exactly what files exist
+    if (analysis.sourceFileTree && analysis.sourceFileTree.length > 0) {
+      context += '## Source Files Available\n';
+      context += 'These are the actual source files you can request. Use exact paths:\n';
+      context += '```\n';
+      context += analysis.sourceFileTree.join('\n');
+      context += '\n```\n\n';
+    }
+
     return context;
   }
 

@@ -7,7 +7,7 @@ import { discoverRepository } from '../scan/discovery.js';
 import { loadIgnoreRules } from '../scan/ignore.js';
 import { partitionIntoUnits } from '../scan/units.js';
 import { analyzeProject } from '../scan/analyze.js';
-import { validateGitRepository } from '../git/index.js';
+import { validateGitRepository, getCurrentCommit } from '../git/index.js';
 import { createManifest, initializeCoverageMap } from '../manifest/index.js';
 import { createLLMClient } from '../llm/index.js';
 import { InteractiveContextProvider } from '../llm/context-provider.js';
@@ -195,6 +195,21 @@ export function createInitCommand() {
           analysisVersion: '1',
         };
 
+        // Record current commit as baseline for future updates
+        const currentCommit = await getCurrentCommit(cwd);
+        const timestamp = new Date().toISOString();
+        manifest.runs.lastSuccessful = {
+          timestamp,
+          gitCommit: currentCommit,
+          notes: 'Initial documentation structure created',
+        };
+        manifest.runs.history.push({
+          timestamp,
+          gitCommit: currentCommit,
+          success: true,
+          notes: 'Initial documentation structure created',
+        });
+
         // Write manifest
         await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
         logger.success('Created docs/.manifest.json');
@@ -207,8 +222,9 @@ export function createInitCommand() {
 
         logger.info('\nNext steps:');
         logger.info('  1. Review the generated documentation');
-        logger.info('  2. Run `docpulse update` to update docs when code changes');
-        logger.info('  3. Commit the docs/ folder to your repository');
+        logger.info('  2. Run `docpulse update --bootstrap` to fill in TODOs');
+        logger.info('  3. Run `docpulse update` after code changes to keep docs in sync');
+        logger.info('  4. Commit the docs/ folder to your repository');
       } catch (error) {
         logger.error('Failed to initialize:', error);
         process.exit(1);
