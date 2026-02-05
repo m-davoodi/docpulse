@@ -10,6 +10,7 @@ Task: Analyze a codebase and decide which documentation categories are needed.
 REQUIRED minimum categories:
 - architecture: Cross-cutting architectural documentation
 - how-to: Step-by-step guides for common tasks
+- onboarding: Getting started guides, new developer setup, project introduction
 
 OPTIONAL categories (only create if evidence exists):
 - api: Public APIs, library interfaces, SDK documentation
@@ -61,7 +62,7 @@ export function createStructurePlanningPrompt(
 Based on the project analysis above, decide which documentation categories are needed.
 
 Remember:
-- ALWAYS include: architecture, how-to
+- ALWAYS include: architecture, how-to, onboarding
 - ADD optional categories ONLY if you have clear evidence
 - Provide specific reasons citing what you see in the codebase
 - List concrete topics to document in each category
@@ -108,6 +109,9 @@ export function parseStructurePlanningResponse(response: string): StructurePlann
   }
   if (!categoryNames.has('how-to')) {
     missingRequired.push('how-to');
+  }
+  if (!categoryNames.has('onboarding')) {
+    missingRequired.push('onboarding');
   }
 
   // Add missing required categories

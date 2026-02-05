@@ -76,6 +76,16 @@ export function createDefaultStructure(): DocStructure {
           'Contributing',
         ],
       },
+      {
+        name: 'onboarding',
+        reason: 'Default: Getting started guides for new developers',
+        topics: [
+          'Prerequisites',
+          'Installation',
+          'First steps',
+          'Project overview',
+        ],
+      },
     ],
   };
 }
